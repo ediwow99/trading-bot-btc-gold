@@ -23,6 +23,8 @@ starting_balance = 1000.0
 balance_usdt = starting_balance
 balance_btc = 0.0
 last_signal = None
+last_ema_fast = None
+last_ema_slow = None
 
 def get_data():
     """Fetch BTC data (OHLCV)."""
@@ -61,7 +63,7 @@ def simulate_trade(price, signal):
             print(f"🔴 Sold BTC at {price:.2f}")
 
 def main():
-    global balance_usdt, balance_btc
+    global balance_usdt, balance_btc, last_ema_fast, last_ema_slow
 
     print("🚀 Starting EMA trading bot (simulation mode)...\n")
     while True:
@@ -70,22 +72,34 @@ def main():
         last = df.iloc[-1]
         price = last["close"]
         signal = last["signal"]
+        ema_fast = last["ema_fast"]
+        ema_slow = last["ema_slow"]
 
-        # Try a simulated trade
+        # Detect crossover manually
+        if last_ema_fast and last_ema_slow:
+            if last_ema_fast <= last_ema_slow and ema_fast > ema_slow:
+                print("📈 Crossover detected → Potential BUY zone")
+            elif last_ema_fast >= last_ema_slow and ema_fast < ema_slow:
+                print("📉 Crossunder detected → Potential SELL zone")
+
+        # Try trade
         simulate_trade(price, signal)
 
-        # Compute wallet value and profit/loss
+        # Compute wallet value
         total_value = balance_usdt + balance_btc * price
         profit = total_value - starting_balance
         profit_percent = (profit / starting_balance) * 100
 
-        # Display full status
+        # Display details
         print(
-            f"[{last['timestamp']}] "
-            f"Price: {price:.2f} | Signal: {signal} | "
+            f"[{last['timestamp']}] Price: {price:.2f} | Signal: {signal} | "
+            f"EMA5: {ema_fast:.2f} | EMA20: {ema_slow:.2f} | "
             f"💰 USDT: {balance_usdt:.2f} | ₿ BTC: {balance_btc:.6f} | "
             f"Total: {total_value:.2f} USDT | 📈 PnL: {profit:+.2f} USDT ({profit_percent:+.2f}%)"
         )
+
+        # Save last EMAs for crossover check
+        last_ema_fast, last_ema_slow = ema_fast, ema_slow
 
         time.sleep(5)
 
