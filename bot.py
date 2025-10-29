@@ -6,12 +6,13 @@ from datetime import datetime
 # === CONFIG ===
 BALANCE = 1000.0      # Starting balance in USDT
 TRADE_AMOUNT = 100     # Amount per simulated trade
-INTERVAL = 5           # seconds
-EMA_SHORT = 5
-EMA_LONG = 20
+INTERVAL = 3           # seconds, fast for scalping
+EMA_SHORT = 3
+EMA_LONG = 8
+SCALP_THRESHOLD = 0.05  # % difference between EMAs to trigger trade
 
 # === FUNCTIONS ===
-last_price = None  # Cache last known price
+last_price = None  # cache last known price
 
 def get_price_from_coingecko(coin_id="bitcoin"):
     """Fetch latest price from CoinGecko with caching and rate-limit handling"""
@@ -46,14 +47,18 @@ def calculate_ema(prices, span):
     return pd.Series(prices).ewm(span=span, adjust=False).mean().iloc[-1]
 
 def get_signal(prices):
-    """Generate trading signal based on EMA crossover"""
+    """Scalping signal based on short EMA crossover and small price moves"""
     if len(prices) < EMA_LONG:
         return "WAIT"
+    
     short_ema = calculate_ema(prices[-EMA_SHORT:], EMA_SHORT)
     long_ema = calculate_ema(prices[-EMA_LONG:], EMA_LONG)
-    if short_ema > long_ema:
+    
+    diff_percent = ((short_ema - long_ema) / long_ema) * 100
+    
+    if diff_percent > SCALP_THRESHOLD:
         return "BUY"
-    elif short_ema < long_ema:
+    elif diff_percent < -SCALP_THRESHOLD:
         return "SELL"
     else:
         return "HOLD"
@@ -80,7 +85,7 @@ balance = BALANCE
 holding = 0
 initial_balance = BALANCE
 
-print(f"\n🚀 Starting EMA trading bot for {symbol} (CoinGecko simulation)...\n")
+print(f"\n🚀 Starting scalping EMA bot for {symbol}...\n")
 
 while True:
     price = get_price_from_coingecko(coin_id)
