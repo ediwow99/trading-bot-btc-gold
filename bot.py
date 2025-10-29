@@ -5,7 +5,7 @@ import time
 from binance.client import Client
 from dotenv import load_dotenv
 
-# Load API keys
+# Load API keys from .env
 load_dotenv()
 api_key = os.getenv("BINANCE_API_KEY")
 api_secret = os.getenv("BINANCE_API_SECRET")
@@ -13,17 +13,19 @@ api_secret = os.getenv("BINANCE_API_SECRET")
 # Connect to Binance Testnet
 client = Client(api_key, api_secret, testnet=True)
 
+# --- Config ---
 symbol = "BTCUSDT"
 interval = "1m"
 limit = 100
 
-# Simulated wallet
-balance_usdt = 1000.0  # starting money
+# --- Simulated wallet ---
+starting_balance = 1000.0
+balance_usdt = starting_balance
 balance_btc = 0.0
 last_signal = None
 
 def get_data():
-    """Fetch recent BTC data (OHLCV)."""
+    """Fetch BTC data (OHLCV)."""
     klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
     df = pd.DataFrame(klines, columns=[
         "timestamp", "open", "high", "low", "close", "volume",
@@ -34,14 +36,14 @@ def get_data():
     return df[["timestamp", "close"]]
 
 def compute_signals(df):
-    """EMA crossover strategy."""
+    """Compute EMA crossover signals."""
     df["ema_fast"] = df["close"].ewm(span=5, adjust=False).mean()
     df["ema_slow"] = df["close"].ewm(span=20, adjust=False).mean()
     df["signal"] = np.where(df["ema_fast"] > df["ema_slow"], "BUY", "SELL")
     return df
 
 def simulate_trade(price, signal):
-    """Simulate buy/sell and update balances."""
+    """Simulate buy/sell trades."""
     global balance_usdt, balance_btc, last_signal
 
     if signal == "BUY" and last_signal != "BUY":
@@ -49,24 +51,19 @@ def simulate_trade(price, signal):
             balance_btc = balance_usdt / price
             balance_usdt = 0
             last_signal = "BUY"
-            print(f"\n🟢 Bought BTC at {price:.2f}")
-            show_balances(price)
+            print(f"🟢 Bought BTC at {price:.2f}")
 
     elif signal == "SELL" and last_signal != "SELL":
         if balance_btc > 0:
             balance_usdt = balance_btc * price
             balance_btc = 0
             last_signal = "SELL"
-            print(f"\n🔴 Sold BTC at {price:.2f}")
-            show_balances(price)
-
-def show_balances(price):
-    """Print current balance and total value."""
-    total_value = balance_usdt + balance_btc * price
-    print(f"💰 USDT: {balance_usdt:.2f} | ₿ BTC: {balance_btc:.6f} | Total Value: {total_value:.2f} USDT")
+            print(f"🔴 Sold BTC at {price:.2f}")
 
 def main():
-    print("🚀 Starting EMA trading bot (simulation mode)...")
+    global balance_usdt, balance_btc
+
+    print("🚀 Starting EMA trading bot (simulation mode)...\n")
     while True:
         df = get_data()
         df = compute_signals(df)
@@ -74,12 +71,23 @@ def main():
         price = last["close"]
         signal = last["signal"]
 
+        # Try a simulated trade
         simulate_trade(price, signal)
 
+        # Compute wallet value and profit/loss
         total_value = balance_usdt + balance_btc * price
-        print(f"[{last['timestamp']}] Price: {price:.2f} | Signal: {signal} | 💰 Total: {total_value:.2f} USDT")
+        profit = total_value - starting_balance
+        profit_percent = (profit / starting_balance) * 100
 
-        time.sleep(5)  # update every 5 seconds
+        # Display full status
+        print(
+            f"[{last['timestamp']}] "
+            f"Price: {price:.2f} | Signal: {signal} | "
+            f"💰 USDT: {balance_usdt:.2f} | ₿ BTC: {balance_btc:.6f} | "
+            f"Total: {total_value:.2f} USDT | 📈 PnL: {profit:+.2f} USDT ({profit_percent:+.2f}%)"
+        )
+
+        time.sleep(5)
 
 if __name__ == "__main__":
     main()
