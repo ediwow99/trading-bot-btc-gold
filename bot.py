@@ -1,116 +1,66 @@
 import time
 import requests
-import pandas as pd
 from datetime import datetime
 
 # === CONFIG ===
-BALANCE = 1000.0      # Starting balance in USDT
-TRADE_AMOUNT = 100     # Amount per simulated trade
-INTERVAL = 3           # seconds, fast for scalping
-EMA_SHORT = 3
-EMA_LONG = 8
-SCALP_THRESHOLD = 0.05  # % difference between EMAs to trigger trade
+BALANCE = 1000.0        # Starting balance in USDT
+TRADE_AMOUNT = 100       # Amount per trade
+INTERVAL = 1             # seconds, fast polling
+TAKE_PROFIT = 0.002      # 0.2% profit
+STOP_LOSS = 0.001        # 0.1% loss
 
 # === FUNCTIONS ===
-last_price = None  # cache last known price
+last_price = None
 
 def get_price_from_coingecko(coin_id="bitcoin"):
-    """Fetch latest price from CoinGecko with caching and rate-limit handling"""
+    """Fetch latest price from CoinGecko with caching"""
     global last_price
     url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
-    backoff = 1  # start with 1 second backoff
-
-    while True:
-        try:
-            resp = requests.get(url, timeout=10)
-            resp.raise_for_status()
-            data = resp.json()
-            price = data[coin_id]["usd"]
-            last_price = price  # update cache
-            return price
-
-        except requests.exceptions.HTTPError as e:
-            if resp.status_code == 429:
-                print(f"⚠️ Rate limit hit. Waiting {backoff}s before retry...")
-                time.sleep(backoff)
-                backoff = min(backoff * 2, 60)  # exponential backoff max 60s
-            else:
-                print(f"❌ HTTP error fetching {coin_id}: {e}. Using last cached price.")
-                return last_price
-
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Request error fetching {coin_id}: {e}. Using last cached price.")
-            return last_price
-
-def calculate_ema(prices, span):
-    """Calculate EMA"""
-    return pd.Series(prices).ewm(span=span, adjust=False).mean().iloc[-1]
-
-def get_signal(prices):
-    """Scalping signal based on short EMA crossover and small price moves"""
-    if len(prices) < EMA_LONG:
-        return "WAIT"
-    
-    short_ema = calculate_ema(prices[-EMA_SHORT:], EMA_SHORT)
-    long_ema = calculate_ema(prices[-EMA_LONG:], EMA_LONG)
-    
-    diff_percent = ((short_ema - long_ema) / long_ema) * 100
-    
-    if diff_percent > SCALP_THRESHOLD:
-        return "BUY"
-    elif diff_percent < -SCALP_THRESHOLD:
-        return "SELL"
-    else:
-        return "HOLD"
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        price = data[coin_id]["usd"]
+        last_price = price
+        return price
+    except:
+        return last_price
 
 # === MAIN ===
-print("Choose your trading asset:")
-print("1️⃣  Bitcoin (BTC)")
-print("2️⃣  Gold (XAU/USD)")
+print("Starting instant scalping bot for BTC...")
 
-choice = input("Enter your choice (1 or 2): ").strip()
-
-if choice == "1":
-    coin_id = "bitcoin"
-    symbol = "BTC"
-elif choice == "2":
-    coin_id = "gold"
-    symbol = "GOLD"
-else:
-    print("❌ Invalid choice. Exiting.")
-    exit()
-
-prices = []
 balance = BALANCE
 holding = 0
-initial_balance = BALANCE
-
-print(f"\n🚀 Starting scalping EMA bot for {symbol}...\n")
+entry_price = None
 
 while True:
-    price = get_price_from_coingecko(coin_id)
+    price = get_price_from_coingecko("bitcoin")
+    if not price:
+        print("⚠️ Price unavailable, skipping...")
+        time.sleep(INTERVAL)
+        continue
 
-    if price:
-        prices.append(price)
-        signal = get_signal(prices)
+    # === Enter position if not holding ===
+    if holding == 0 and balance >= TRADE_AMOUNT:
+        holding = TRADE_AMOUNT / price
+        balance -= TRADE_AMOUNT
+        entry_price = price
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] BUY at {price:.2f} USD | Holding: {holding:.6f} BTC")
 
-        # === Simulate trades ===
-        if signal == "BUY" and balance >= TRADE_AMOUNT:
-            holding += TRADE_AMOUNT / price
-            balance -= TRADE_AMOUNT
-        elif signal == "SELL" and holding > 0:
+    # === Check take profit / stop loss ===
+    elif holding > 0:
+        profit_target = entry_price * (1 + TAKE_PROFIT)
+        stop_target = entry_price * (1 - STOP_LOSS)
+
+        if price >= profit_target:
             balance += holding * price
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] SELL (TP) at {price:.2f} USD | Balance: {balance:.2f} USDT")
             holding = 0
-
-        total_value = balance + (holding * price)
-        profit_percent = ((total_value - initial_balance) / initial_balance) * 100
-
-        print(
-            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-            f"{symbol}: {price:,.2f} USD | Signal: {signal:<4} | "
-            f"💰 Total: {total_value:,.2f} USDT | 📈 P/L: {profit_percent:+.2f}%"
-        )
-    else:
-        print("❌ Skipping update due to fetch error")
+            entry_price = None
+        elif price <= stop_target:
+            balance += holding * price
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] SELL (SL) at {price:.2f} USD | Balance: {balance:.2f} USDT")
+            holding = 0
+            entry_price = None
 
     time.sleep(INTERVAL)
