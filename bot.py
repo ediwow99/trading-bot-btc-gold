@@ -1,6 +1,11 @@
-import ssl
-import certifi
+import ssl, certifi, os, requests
+
+# Force Python to use certifi's trusted certificate bundle
 ssl._create_default_https_context = lambda: ssl.create_default_context(cafile=certifi.where())
+
+# Optional: tell requests to always use certifi CA
+os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
+os.environ["SSL_CERT_FILE"] = certifi.where()
 
 import time
 import datetime
