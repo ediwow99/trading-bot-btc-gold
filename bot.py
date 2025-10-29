@@ -11,18 +11,35 @@ EMA_SHORT = 5
 EMA_LONG = 20
 
 # === FUNCTIONS ===
+last_price = None  # Cache last known price
 
 def get_price_from_coingecko(coin_id="bitcoin"):
-    """Fetch the latest price from CoinGecko"""
+    """Fetch latest price from CoinGecko with caching and rate-limit handling"""
+    global last_price
     url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
-    try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        return data[coin_id]["usd"]
-    except Exception as e:
-        print(f"⚠️ Error fetching {coin_id} price: {e}")
-        return None
+    backoff = 1  # start with 1 second backoff
+
+    while True:
+        try:
+            resp = requests.get(url, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            price = data[coin_id]["usd"]
+            last_price = price  # update cache
+            return price
+
+        except requests.exceptions.HTTPError as e:
+            if resp.status_code == 429:
+                print(f"⚠️ Rate limit hit. Waiting {backoff}s before retry...")
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 60)  # exponential backoff max 60s
+            else:
+                print(f"❌ HTTP error fetching {coin_id}: {e}. Using last cached price.")
+                return last_price
+
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Request error fetching {coin_id}: {e}. Using last cached price.")
+            return last_price
 
 def calculate_ema(prices, span):
     """Calculate EMA"""
