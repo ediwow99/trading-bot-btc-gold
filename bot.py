@@ -1,107 +1,87 @@
-import os
-import pandas as pd
-import numpy as np
 import time
-from binance.client import Client
-from dotenv import load_dotenv
+import datetime
+import requests
+import pandas as pd
 
-# Load API keys from .env
-load_dotenv()
-api_key = os.getenv("BINANCE_API_KEY")
-api_secret = os.getenv("BINANCE_API_SECRET")
+# --- SETTINGS ---
+API_URL = "https://api.binance.com/api/v3/klines"
+SYMBOL = "BTCUSDT"
+INTERVAL = "1m"
+INITIAL_BALANCE = 1000.0
+TRADE_SIZE = 0.1  # fraction of balance to trade each time
 
-# Connect to Binance Testnet
-client = Client(api_key, api_secret, testnet=True)
+# --- FUNCTIONS ---
 
-# --- Config ---
-symbol = "BTCUSDT"
-interval = "1m"
-limit = 100
+def get_price_data():
+    params = {"symbol": SYMBOL, "interval": INTERVAL, "limit": 100}
+    response = requests.get(API_URL, params=params)
+    data = response.json()
 
-# --- Simulated wallet ---
-starting_balance = 1000.0
-balance_usdt = starting_balance
-balance_btc = 0.0
-last_signal = None
-last_ema_fast = None
-last_ema_slow = None
-
-def get_data():
-    """Fetch BTC data (OHLCV)."""
-    klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
-    df = pd.DataFrame(klines, columns=[
-        "timestamp", "open", "high", "low", "close", "volume",
-        "close_time", "qav", "trades", "tbbav", "tbqav", "ignore"
+    frame = pd.DataFrame(data, columns=[
+        'time', 'open', 'high', 'low', 'close',
+        'volume', 'close_time', 'quote_asset_volume',
+        'trades', 'taker_base_vol', 'taker_quote_vol', 'ignore'
     ])
-    df["close"] = df["close"].astype(float)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-    return df[["timestamp", "close"]]
+    frame['time'] = pd.to_datetime(frame['time'], unit='ms')
+    frame['close'] = frame['close'].astype(float)
+    return frame
 
-def compute_signals(df):
-    """Compute EMA crossover signals."""
-    df["ema_fast"] = df["close"].ewm(span=5, adjust=False).mean()
-    df["ema_slow"] = df["close"].ewm(span=20, adjust=False).mean()
-    df["signal"] = np.where(df["ema_fast"] > df["ema_slow"], "BUY", "SELL")
-    return df
 
-def simulate_trade(price, signal):
-    """Simulate buy/sell trades."""
-    global balance_usdt, balance_btc, last_signal
+def get_signal(df):
+    df['EMA12'] = df['close'].ewm(span=12, adjust=False).mean()
+    df['EMA26'] = df['close'].ewm(span=26, adjust=False).mean()
 
-    if signal == "BUY" and last_signal != "BUY":
-        if balance_usdt > 0:
-            balance_btc = balance_usdt / price
-            balance_usdt = 0
-            last_signal = "BUY"
-            print(f"🟢 Bought BTC at {price:.2f}")
+    if df['EMA12'].iloc[-1] > df['EMA26'].iloc[-1]:
+        return "BUY"
+    elif df['EMA12'].iloc[-1] < df['EMA26'].iloc[-1]:
+        return "SELL"
+    else:
+        return "HOLD"
 
-    elif signal == "SELL" and last_signal != "SELL":
-        if balance_btc > 0:
-            balance_usdt = balance_btc * price
-            balance_btc = 0
-            last_signal = "SELL"
-            print(f"🔴 Sold BTC at {price:.2f}")
 
-def main():
-    global balance_usdt, balance_btc, last_ema_fast, last_ema_slow
+def simulate_trade(signal, balance, position, last_price):
+    """ Simulate buying/selling with current balance """
+    if signal == "BUY" and position == 0:
+        position = balance / last_price
+        balance = 0
+        action = "🟢 BOUGHT"
+    elif signal == "SELL" and position > 0:
+        balance = position * last_price
+        position = 0
+        action = "🔴 SOLD"
+    else:
+        action = "⚪ HOLD"
+    return balance, position, action
 
-    print("🚀 Starting EMA trading bot (simulation mode)...\n")
-    while True:
-        df = get_data()
-        df = compute_signals(df)
-        last = df.iloc[-1]
-        price = last["close"]
-        signal = last["signal"]
-        ema_fast = last["ema_fast"]
-        ema_slow = last["ema_slow"]
 
-        # Detect crossover manually
-        if last_ema_fast and last_ema_slow:
-            if last_ema_fast <= last_ema_slow and ema_fast > ema_slow:
-                print("📈 Crossover detected → Potential BUY zone")
-            elif last_ema_fast >= last_ema_slow and ema_fast < ema_slow:
-                print("📉 Crossunder detected → Potential SELL zone")
+# --- MAIN LOOP ---
+print("🚀 Starting EMA trading bot (simulation mode)...")
+balance = INITIAL_BALANCE
+position = 0
+last_signal = None
 
-        # Try trade
-        simulate_trade(price, signal)
+while True:
+    try:
+        df = get_price_data()
+        signal = get_signal(df)
+        price = df['close'].iloc[-1]
 
-        # Compute wallet value
-        total_value = balance_usdt + balance_btc * price
-        profit = total_value - starting_balance
-        profit_percent = (profit / starting_balance) * 100
+        # trade only when new signal appears
+        if signal != last_signal and signal != "HOLD":
+            balance, position, action = simulate_trade(signal, balance, position, price)
+            last_signal = signal
+        else:
+            action = "⚪ HOLD"
 
-        # Display details
-        print(
-            f"[{last['timestamp']}] Price: {price:.2f} | Signal: {signal} | "
-            f"EMA5: {ema_fast:.2f} | EMA20: {ema_slow:.2f} | "
-            f"💰 USDT: {balance_usdt:.2f} | ₿ BTC: {balance_btc:.6f} | "
-            f"Total: {total_value:.2f} USDT | 📈 PnL: {profit:+.2f} USDT ({profit_percent:+.2f}%)"
-        )
+        total_value = balance + (position * price)
 
-        # Save last EMAs for crossover check
-        last_ema_fast, last_ema_slow = ema_fast, ema_slow
+        print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+              f"Price: {price:,.2f} | Signal: {signal:<4} | {action} | "
+              f"💰 Total: {total_value:,.2f} USDT")
 
-        time.sleep(5)
+        # wait for next candle
+        time.sleep(60)
 
-if __name__ == "__main__":
-    main()
+    except Exception as e:
+        print("Error:", e)
+        time.sleep(10)
