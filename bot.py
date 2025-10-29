@@ -188,6 +188,7 @@ try:
     print(f"✅ Connected to {EXCHANGE.upper()} WebSocket\n")
     
     tick_count = 0
+    last_status_time = time.time()
     
     while True:
         # Get real-time price
@@ -204,6 +205,21 @@ try:
         pnl_amount = total_value - BALANCE
         pnl_percent = (pnl_amount / BALANCE) * 100
         
+        # === SHOW STATUS EVERY 5 SECONDS ===
+        current_time = time.time()
+        if current_time - last_status_time >= 5:
+            status = "IN POSITION" if holding > 0 else "WAITING"
+            print(f"📊 [{format_time()}] Status: {status}")
+            print(f"   Price: ${price:,.2f} | Balance: ${balance:.2f} USDT")
+            print(f"   Portfolio Value: ${total_value:.2f} USDT")
+            print(f"   Total PnL: ${pnl_amount:+.2f} USDT ({pnl_percent:+.2f}%)")
+            if holding > 0:
+                unrealized_pnl = (price - entry_price) * holding
+                unrealized_pct = ((price - entry_price) / entry_price) * 100
+                print(f"   Unrealized P/L: ${unrealized_pnl:+.2f} ({unrealized_pct:+.3f}%)")
+            print()
+            last_status_time = current_time
+        
         # === ENTER POSITION ===
         if holding == 0 and balance >= TRADE_AMOUNT:
             holding = TRADE_AMOUNT / price
@@ -211,12 +227,14 @@ try:
             entry_price = price
             trade_count += 1
             
-            print(f"🟢 [{format_time()}] BUY #{trade_count}")
+            print(f"🟢 [{format_time()}] 📈 BUY (LONG) #{trade_count}")
             print(f"   Price: ${price:,.2f}")
-            print(f"   Amount: {holding:.6f} BTC")
+            print(f"   Amount: {holding:.6f} BTC (${TRADE_AMOUNT:.2f})")
             print(f"   Entry: ${entry_price:,.2f}")
             print(f"   Target TP: ${entry_price * (1 + TAKE_PROFIT):,.2f} (+{TAKE_PROFIT*100}%)")
-            print(f"   Target SL: ${entry_price * (1 - STOP_LOSS):,.2f} (-{STOP_LOSS*100}%)\n")
+            print(f"   Target SL: ${entry_price * (1 - STOP_LOSS):,.2f} (-{STOP_LOSS*100}%)")
+            print(f"   Balance After: ${balance:.2f} USDT")
+            print(f"   Portfolio Value: ${balance + (holding * price):.2f} USDT\n")
         
         # === EXIT POSITION ===
         elif holding > 0 and entry_price:
