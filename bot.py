@@ -1,96 +1,94 @@
-import ssl, certifi, os, requests
-
-# Force Python to use certifi's trusted certificate bundle
-ssl._create_default_https_context = lambda: ssl.create_default_context(cafile=certifi.where())
-
-# Optional: tell requests to always use certifi CA
-os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
-os.environ["SSL_CERT_FILE"] = certifi.where()
-
 import time
-import datetime
 import requests
 import pandas as pd
+from datetime import datetime
 
-# --- SETTINGS ---
-API_URL = "https://api.binance.com/api/v3/klines"
-SYMBOL = "BTCUSDT"
-INTERVAL = "1m"
-INITIAL_BALANCE = 1000.0
-TRADE_SIZE = 0.1  # fraction of balance to trade each time
+# === CONFIG ===
+BALANCE = 1000.0      # Starting balance in USDT
+TRADE_AMOUNT = 100     # Amount per simulated trade
+INTERVAL = 5           # seconds
+EMA_SHORT = 5
+EMA_LONG = 20
 
-# --- FUNCTIONS ---
+# === FUNCTIONS ===
 
-def get_price_data():
-    params = {"symbol": SYMBOL, "interval": INTERVAL, "limit": 100}
-    response = requests.get(API_URL, params=params)
-    data = response.json()
+def get_price_from_coingecko(coin_id="bitcoin"):
+    """Fetch the latest price from CoinGecko"""
+    url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        return data[coin_id]["usd"]
+    except Exception as e:
+        print(f"⚠️ Error fetching {coin_id} price: {e}")
+        return None
 
-    frame = pd.DataFrame(data, columns=[
-        'time', 'open', 'high', 'low', 'close',
-        'volume', 'close_time', 'quote_asset_volume',
-        'trades', 'taker_base_vol', 'taker_quote_vol', 'ignore'
-    ])
-    frame['time'] = pd.to_datetime(frame['time'], unit='ms')
-    frame['close'] = frame['close'].astype(float)
-    return frame
+def calculate_ema(prices, span):
+    """Calculate EMA"""
+    return pd.Series(prices).ewm(span=span, adjust=False).mean().iloc[-1]
 
-
-def get_signal(df):
-    df['EMA12'] = df['close'].ewm(span=12, adjust=False).mean()
-    df['EMA26'] = df['close'].ewm(span=26, adjust=False).mean()
-
-    if df['EMA12'].iloc[-1] > df['EMA26'].iloc[-1]:
+def get_signal(prices):
+    """Generate trading signal based on EMA crossover"""
+    if len(prices) < EMA_LONG:
+        return "WAIT"
+    short_ema = calculate_ema(prices[-EMA_SHORT:], EMA_SHORT)
+    long_ema = calculate_ema(prices[-EMA_LONG:], EMA_LONG)
+    if short_ema > long_ema:
         return "BUY"
-    elif df['EMA12'].iloc[-1] < df['EMA26'].iloc[-1]:
+    elif short_ema < long_ema:
         return "SELL"
     else:
         return "HOLD"
 
+# === MAIN ===
+print("Choose your trading asset:")
+print("1️⃣  Bitcoin (BTC)")
+print("2️⃣  Gold (XAU/USD)")
 
-def simulate_trade(signal, balance, position, last_price):
-    """ Simulate buying/selling with current balance """
-    if signal == "BUY" and position == 0:
-        position = balance / last_price
-        balance = 0
-        action = "🟢 BOUGHT"
-    elif signal == "SELL" and position > 0:
-        balance = position * last_price
-        position = 0
-        action = "🔴 SOLD"
-    else:
-        action = "⚪ HOLD"
-    return balance, position, action
+choice = input("Enter your choice (1 or 2): ").strip()
 
+if choice == "1":
+    coin_id = "bitcoin"
+    symbol = "BTC"
+elif choice == "2":
+    coin_id = "gold"
+    symbol = "GOLD"
+else:
+    print("❌ Invalid choice. Exiting.")
+    exit()
 
-# --- MAIN LOOP ---
-print("🚀 Starting EMA trading bot (simulation mode)...")
-balance = INITIAL_BALANCE
-position = 0
-last_signal = None
+prices = []
+balance = BALANCE
+holding = 0
+initial_balance = BALANCE
+
+print(f"\n🚀 Starting EMA trading bot for {symbol} (CoinGecko simulation)...\n")
 
 while True:
-    try:
-        df = get_price_data()
-        signal = get_signal(df)
-        price = df['close'].iloc[-1]
+    price = get_price_from_coingecko(coin_id)
 
-        # trade only when new signal appears
-        if signal != last_signal and signal != "HOLD":
-            balance, position, action = simulate_trade(signal, balance, position, price)
-            last_signal = signal
-        else:
-            action = "⚪ HOLD"
+    if price:
+        prices.append(price)
+        signal = get_signal(prices)
 
-        total_value = balance + (position * price)
+        # === Simulate trades ===
+        if signal == "BUY" and balance >= TRADE_AMOUNT:
+            holding += TRADE_AMOUNT / price
+            balance -= TRADE_AMOUNT
+        elif signal == "SELL" and holding > 0:
+            balance += holding * price
+            holding = 0
 
-        print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-              f"Price: {price:,.2f} | Signal: {signal:<4} | {action} | "
-              f"💰 Total: {total_value:,.2f} USDT")
+        total_value = balance + (holding * price)
+        profit_percent = ((total_value - initial_balance) / initial_balance) * 100
 
-        # wait for next candle
-        time.sleep(60)
+        print(
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+            f"{symbol}: {price:,.2f} USD | Signal: {signal:<4} | "
+            f"💰 Total: {total_value:,.2f} USDT | 📈 P/L: {profit_percent:+.2f}%"
+        )
+    else:
+        print("❌ Skipping update due to fetch error")
 
-    except Exception as e:
-        print("Error:", e)
-        time.sleep(10)
+    time.sleep(INTERVAL)
