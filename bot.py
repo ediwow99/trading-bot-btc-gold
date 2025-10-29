@@ -1,21 +1,35 @@
 import json
 import time
 from datetime import datetime
-from websocket import create_connection
+try:
+    from websocket import create_connection
+except ImportError:
+    print("❌ Error: websocket-client not installed")
+    print("Please run: pip install websocket-client")
+    exit(1)
 
 # === CONFIG ===
 BALANCE = 1000.0        # Starting balance in USDT
 TRADE_AMOUNT = 100      # Amount per trade
-TAKE_PROFIT = 0.001     # 0.1% profit
-STOP_LOSS = 0.001       # 0.1% loss
-SYMBOL = "BTCUSDT"      # Trading pair (uppercase for Bybit)
-EXCHANGE = "bybit"      # Options: bybit, okx, kucoin
+TAKE_PROFIT = 0.0015    # 0.15% profit (easier to hit)
+STOP_LOSS = 0.0015      # 0.15% loss
+SYMBOL = "btcusdt"      # Trading pair (lowercase)
+EXCHANGE = "gate"       # Options: gate, htx (huobi), bitfinex
 
-# === EXCHANGE WEBSOCKET URLS ===
-WEBSOCKET_URLS = {
-    "bybit": f"wss://stream.bybit.com/v5/public/linear",
-    "okx": f"wss://ws.okx.com:8443/ws/v5/public",
-    "kucoin": f"wss://ws-api-spot.kucoin.com/"  # Requires token setup
+# === EXCHANGE CONFIGS ===
+EXCHANGE_CONFIGS = {
+    "gate": {
+        "ws_url": "wss://api.gateio.ws/ws/v4/",
+        "symbol_format": lambda s: f"{s[:-4]}_{s[-4:]}".upper()  # BTC_USDT
+    },
+    "htx": {  # Huobi
+        "ws_url": "wss://api.huobi.pro/ws",
+        "symbol_format": lambda s: s.lower()  # btcusdt
+    },
+    "bitfinex": {
+        "ws_url": "wss://api-pub.bitfinex.com/ws/2",
+        "symbol_format": lambda s: f"t{s.upper()}"  # tBTCUSDT
+    }
 }
 
 # === VARIABLES ===
@@ -26,71 +40,121 @@ trade_count = 0
 last_price = None
 
 # === FUNCTIONS ===
-def connect_bybit():
-    """Connect to Bybit WebSocket for real-time price updates"""
-    ws = create_connection(WEBSOCKET_URLS["bybit"])
+def connect_gate():
+    """Connect to Gate.io WebSocket"""
+    ws = create_connection(EXCHANGE_CONFIGS["gate"]["ws_url"])
     
-    # Subscribe to trades stream
+    symbol = EXCHANGE_CONFIGS["gate"]["symbol_format"](SYMBOL)
+    
     subscribe_msg = {
-        "op": "subscribe",
-        "args": [f"publicTrade.{SYMBOL}"]
+        "time": int(time.time()),
+        "channel": "spot.trades",
+        "event": "subscribe",
+        "payload": [symbol]
+    }
+    ws.send(json.dumps(subscribe_msg))
+    
+    response = ws.recv()
+    print(f"📡 Gate.io subscription: {response}")
+    
+    return ws
+
+def connect_htx():
+    """Connect to HTX (Huobi) WebSocket"""
+    ws = create_connection(EXCHANGE_CONFIGS["htx"]["ws_url"])
+    
+    symbol = EXCHANGE_CONFIGS["htx"]["symbol_format"](SYMBOL)
+    
+    subscribe_msg = {
+        "sub": f"market.{symbol}.trade.detail",
+        "id": "id1"
+    }
+    ws.send(json.dumps(subscribe_msg))
+    
+    # HTX sends gzip compressed data, need to handle it
+    response = ws.recv()
+    print(f"📡 HTX subscription response received")
+    
+    return ws
+
+def connect_bitfinex():
+    """Connect to Bitfinex WebSocket"""
+    ws = create_connection(EXCHANGE_CONFIGS["bitfinex"]["ws_url"])
+    
+    symbol = EXCHANGE_CONFIGS["bitfinex"]["symbol_format"](SYMBOL)
+    
+    subscribe_msg = {
+        "event": "subscribe",
+        "channel": "trades",
+        "symbol": symbol
     }
     ws.send(json.dumps(subscribe_msg))
     
     # Wait for subscription confirmation
-    response = ws.recv()
-    print(f"📡 Bybit subscription: {response}")
+    while True:
+        response = ws.recv()
+        data = json.loads(response)
+        if isinstance(data, dict) and data.get('event') == 'subscribed':
+            print(f"📡 Bitfinex subscription: {response}")
+            break
     
     return ws
 
-def connect_okx():
-    """Connect to OKX WebSocket for real-time price updates"""
-    ws = create_connection(WEBSOCKET_URLS["okx"])
-    
-    # Subscribe to trades stream
-    subscribe_msg = {
-        "op": "subscribe",
-        "args": [{
-            "channel": "trades",
-            "instId": f"{SYMBOL.replace('USDT', '-USDT')}"
-        }]
-    }
-    ws.send(json.dumps(subscribe_msg))
-    
-    # Wait for subscription confirmation
-    response = ws.recv()
-    print(f"📡 OKX subscription: {response}")
-    
-    return ws
-
-def get_price_bybit(ws):
-    """Get instant price from Bybit WebSocket"""
+def get_price_gate(ws):
+    """Get price from Gate.io WebSocket"""
     try:
         result = ws.recv()
         data = json.loads(result)
         
-        # Handle heartbeat
-        if data.get('op') == 'ping':
-            ws.send(json.dumps({"op": "pong"}))
-            return None
-        
-        # Extract price from trade data
-        if 'data' in data and len(data['data']) > 0:
-            return float(data['data'][0]['p'])
+        if data.get('event') == 'update' and 'result' in data:
+            trades = data['result']
+            if trades and len(trades) > 0:
+                return float(trades[0]['price'])
         
         return None
     except Exception as e:
         return None
 
-def get_price_okx(ws):
-    """Get instant price from OKX WebSocket"""
+def get_price_htx(ws):
+    """Get price from HTX WebSocket"""
+    import gzip
+    
+    try:
+        result = ws.recv()
+        
+        # HTX uses gzip compression
+        try:
+            data = json.loads(gzip.decompress(result).decode('utf-8'))
+        except:
+            data = json.loads(result)
+        
+        # Handle ping
+        if 'ping' in data:
+            ws.send(json.dumps({'pong': data['ping']}))
+            return None
+        
+        # Extract price
+        if 'tick' in data and 'data' in data['tick']:
+            trades = data['tick']['data']
+            if trades and len(trades) > 0:
+                return float(trades[0]['price'])
+        
+        return None
+    except Exception as e:
+        return None
+
+def get_price_bitfinex(ws):
+    """Get price from Bitfinex WebSocket"""
     try:
         result = ws.recv()
         data = json.loads(result)
         
-        # Extract price from trade data
-        if 'data' in data and len(data['data']) > 0:
-            return float(data['data'][0]['px'])
+        # Bitfinex sends array format for trades
+        if isinstance(data, list) and len(data) > 1:
+            if data[1] == 'te':  # Trade executed
+                # Format: [CHANNEL_ID, "te", [ID, MTS, AMOUNT, PRICE]]
+                if len(data) > 2 and isinstance(data[2], list) and len(data[2]) >= 4:
+                    return float(data[2][3])
         
         return None
     except Exception as e:
@@ -101,20 +165,23 @@ def format_time():
 
 # === MAIN LOOP ===
 print(f"🚀 Real-Time Scalping Bot Started!")
-print(f"   Exchange: {EXCHANGE.upper()}")
-print(f"   Symbol: {SYMBOL}")
+print(f"   Exchange: {EXCHANGE.upper()} (Philippines-compliant)")
+print(f"   Symbol: {SYMBOL.upper()}")
 print(f"   Starting Balance: {BALANCE:.2f} USDT")
 print(f"   Take Profit: {TAKE_PROFIT*100}% | Stop Loss: {STOP_LOSS*100}%")
 print(f"   Press Ctrl+C to stop\n")
 
 try:
     # Connect based on selected exchange
-    if EXCHANGE == "bybit":
-        ws = connect_bybit()
-        get_price = get_price_bybit
-    elif EXCHANGE == "okx":
-        ws = connect_okx()
-        get_price = get_price_okx
+    if EXCHANGE == "gate":
+        ws = connect_gate()
+        get_price = get_price_gate
+    elif EXCHANGE == "htx":
+        ws = connect_htx()
+        get_price = get_price_htx
+    elif EXCHANGE == "bitfinex":
+        ws = connect_bitfinex()
+        get_price = get_price_bitfinex
     else:
         raise ValueError(f"Unsupported exchange: {EXCHANGE}")
     
@@ -123,7 +190,7 @@ try:
     tick_count = 0
     
     while True:
-        # Get real-time price (updates multiple times per second)
+        # Get real-time price
         price = get_price(ws)
         
         if not price:
@@ -168,7 +235,7 @@ try:
                 print(f"   Trade Profit: ${profit:,.2f} (+{profit_pct:.3f}%)")
                 print(f"   Balance: ${balance:.2f} USDT")
                 print(f"   Total PnL: ${pnl_amount:+.2f} ({pnl_percent:+.2f}%)")
-                print(f"   Ticks processed: {tick_count}\n")
+                print(f"   Ticks: {tick_count}\n")
                 
                 holding = 0
                 entry_price = None
@@ -185,15 +252,15 @@ try:
                 print(f"   Trade Loss: ${loss:,.2f} ({loss_pct:.3f}%)")
                 print(f"   Balance: ${balance:.2f} USDT")
                 print(f"   Total PnL: ${pnl_amount:+.2f} ({pnl_percent:+.2f}%)")
-                print(f"   Ticks processed: {tick_count}\n")
+                print(f"   Ticks: {tick_count}\n")
                 
                 holding = 0
                 entry_price = None
                 tick_count = 0
             
             else:
-                # Show live position status every 100 ticks
-                if tick_count % 100 == 0:
+                # Show live position status every 50 ticks
+                if tick_count % 50 == 0:
                     unrealized_pnl = (price - entry_price) * holding
                     unrealized_pct = ((price - entry_price) / entry_price) * 100
                     distance_to_tp = ((profit_target - price) / price) * 100
@@ -202,22 +269,18 @@ try:
                     print(f"📊 [{format_time()}] In Position (Tick #{tick_count})")
                     print(f"   Current: ${price:,.2f} | Entry: ${entry_price:,.2f}")
                     print(f"   Unrealized: ${unrealized_pnl:+.2f} ({unrealized_pct:+.3f}%)")
-                    print(f"   Distance to TP: {distance_to_tp:.3f}% | SL: {distance_to_sl:.3f}%")
-                    print(f"   Portfolio: ${total_value:.2f} USDT\n")
+                    print(f"   To TP: {distance_to_tp:.3f}% | To SL: {distance_to_sl:.3f}%\n")
 
 except KeyboardInterrupt:
     print("\n🛑 Shutting down bot...")
     
-    # Close WebSocket
     try:
         ws.close()
     except:
         pass
     
-    # Final calculation
     if holding > 0 and last_price:
-        print(f"⚠️  Still holding {holding:.6f} BTC")
-        print(f"   Last price: ${last_price:,.2f}")
+        print(f"⚠️  Still holding {holding:.6f} BTC @ ${last_price:,.2f}")
         total_value = balance + (holding * last_price)
     else:
         total_value = balance
@@ -225,18 +288,14 @@ except KeyboardInterrupt:
     pnl_amount = total_value - BALANCE
     pnl_percent = (pnl_amount / BALANCE) * 100
     
-    win_rate = "N/A"
-    if trade_count > 0:
-        print(f"\n📈 FINAL RESULTS")
-        print(f"   Starting Balance: ${BALANCE:.2f} USDT")
-        print(f"   Final Balance: ${total_value:.2f} USDT")
-        print(f"   Total Trades: {trade_count}")
-        print(f"   Profit/Loss: ${pnl_amount:+.2f} USDT ({pnl_percent:+.2f}%)")
-    
-    print(f"\n👋 Bot stopped successfully")
+    print(f"\n📈 FINAL RESULTS")
+    print(f"   Starting: ${BALANCE:.2f} USDT")
+    print(f"   Final: ${total_value:.2f} USDT")
+    print(f"   Trades: {trade_count}")
+    print(f"   P/L: ${pnl_amount:+.2f} ({pnl_percent:+.2f}%)")
+    print(f"\n👋 Bot stopped")
 
 except Exception as e:
     print(f"\n❌ Error: {e}")
     import traceback
     traceback.print_exc()
-    print("\nBot crashed. Please restart.")
